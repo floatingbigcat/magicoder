@@ -347,6 +347,9 @@ class SupportedModelKeys(Enum):
     DEEPSEEK_CODER_6_7B = "deepseek-ai/deepseek-coder-6.7b-base"
     DEEPSEEK_CODER_33B = "deepseek-ai/deepseek-coder-33b-base"
 
+    ### Magicoder it self model
+    MAGICODER_S_CL_7B = "ise-uiuc/Magicoder-S-CL-7B"
+
     @staticmethod
     def all() -> list[str]:
         return [member.value for member in SupportedModelKeys]
@@ -360,6 +363,9 @@ class SupportedModelKeys(Enum):
             # SupportedModelKeys.WIZARDCODER_CODELLAMA_PYTHON_7B.value,
             # SupportedModelKeys.WIZARDCODER_CODELLAMA_PYTHON_13B.value,
             # SupportedModelKeys.WIZARDCODER_CODELLAMA_PYTHON_34B.value,
+
+            ### Magicoder should belong to codellama
+            SupportedModelKeys.MAGICODER_S_CL_7B.value,
         ]
 
     @staticmethod

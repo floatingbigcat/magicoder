@@ -136,8 +136,9 @@ def train():
         tuple[ModelArguments, TrainingArguments, Args],
         parser.parse_args_into_dataclasses(),
     )
-    dataset = load_dataset("json", data_files=args.datafile_paths, split="train")
-
+    # dataset = load_dataset("json", data_files=args.datafile_paths, split="train")
+    # dataset = load_dataset(args.datafile_paths, split="train")
+    dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K",split="train")
     model_key = model_args.model_key
     if (model_name_or_path := model_args.model_name_or_path) is None:
         model_name_or_path = model_key
