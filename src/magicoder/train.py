@@ -3,7 +3,7 @@ from typing import cast
 
 import torch
 from datasets import load_dataset
-from transformers import HfArgumentParser, Trainer, TrainingArguments
+from transformers import HfArgumentParser, Trainer, TrainingArguments, AutoModelForCausalLM
 
 from magicoder.llm_wrapper import (
     DecodingConfig,
@@ -130,6 +130,48 @@ class Args:
     use_flash_attention: bool = field(default=False)
 
 
+class DDTrainer(Trainer): # Decrease Distance
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.base_params = [p.detach().cuda() for p in AutoModelForCausalLM.from_pretrained('meta-llama/Llama-2-7b-hf',torch_dtype=torch.bfloat16).parameters()]
+
+    def compute_loss(self, model, inputs, *args, **kwargs):
+        # Forward pass
+        outputs = model(**inputs)
+        ppl_loss = outputs.loss
+        
+        # Compute Model Distance Loss Term
+        distance_loss = 0
+        for param, base_param in zip(model.parameters(), self.base_params):
+            if param.requires_grad == False:
+                continue
+            if param.shape != base_param.shape:
+                distance_loss += torch.mean((param[: base_param.shape[0], : base_param.shape[1]] - base_param) ** 2)
+            else:
+                distance_loss += torch.mean((param - base_param) ** 2)
+        # distance_loss /= len(self.base_params)
+                
+        return ppl_loss, distance_loss
+
+    def training_step(self, model, inputs) -> torch.Tensor:
+        model.train()
+        inputs = self._prepare_inputs(inputs)
+
+        with self.compute_loss_context_manager():
+            ppl_loss, distance_loss = self.compute_loss(model, inputs)
+        
+        self.log({'ppl_loss':ppl_loss.mean().item(), 'distance_loss':distance_loss.mean().item()})
+        # self.log({'distance_loss':distance_loss.mean().item()})
+        
+        if self.args.n_gpu > 1:
+            ppl_loss, distance_loss = ppl_loss.mean(), distance_loss.mean()  # mean() to average on multi-gpu parallel training
+
+        else:
+            self.accelerator.backward(ppl_loss+distance_loss)
+
+        return (ppl_loss+distance_loss).detach() / self.args.gradient_accumulation_steps
+
+
 def train():
     parser = HfArgumentParser((ModelArguments, TrainingArguments, Args))
     model_args, training_args, args = cast(
@@ -186,8 +228,13 @@ def train():
     print("Parallel mode:", training_args.parallel_mode)
     data_collator = get_data_collator(args, state.tokenization_context.pad_token_id)
 
+    print("Freeze Model except QK")
+    for name, parameters in state.model.named_parameters():
+        if 'q_proj' not in name and 'k_proj' not in name:
+            parameters.requires_grad = False
+
     # neftune_noise_alpha
-    trainer = Trainer(
+    trainer = DDTrainer(
         model=state.model,
         args=training_args,
         train_dataset=train_dataset,
