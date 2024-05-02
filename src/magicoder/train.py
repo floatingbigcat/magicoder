@@ -128,48 +128,67 @@ class Args:
         default=0.05, metadata={"help": "0--1 means ratio, >1 means number of examples"}
     )
     use_flash_attention: bool = field(default=False)
+    c0: float = 1
+    c1: float = 1
+
 
 
 class DDTrainer(Trainer): # Decrease Distance
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        self.c0 = kwargs.pop("c0")
+        self.c1 = kwargs.pop("c1")
         self.base_params = [p.detach().cuda() for p in AutoModelForCausalLM.from_pretrained('meta-llama/Llama-2-7b-hf',torch_dtype=torch.bfloat16).parameters()]
+        super().__init__(*args, **kwargs)
 
     def compute_loss(self, model, inputs, *args, **kwargs):
         # Forward pass
         outputs = model(**inputs)
         ppl_loss = outputs.loss
+        ppl_loss *= self.c0
         
         # Compute Model Distance Loss Term
-        distance_loss = 0
+        dist_loss = 0
+        p_count = 0
         for param, base_param in zip(model.parameters(), self.base_params):
             if param.requires_grad == False:
                 continue
             if param.shape != base_param.shape:
-                distance_loss += torch.mean((param[: base_param.shape[0], : base_param.shape[1]] - base_param) ** 2)
+                dist_loss += torch.mean((param[: base_param.shape[0], : base_param.shape[1]] - base_param) ** 2)
             else:
-                distance_loss += torch.mean((param - base_param) ** 2)
-        # distance_loss /= len(self.base_params)
-                
-        return ppl_loss, distance_loss
+                dist_loss += torch.mean((param - base_param) ** 2)
+            p_count += 1
+        dist_loss /= p_count
+        
+        # dist_loss = torch.log(dist_loss)
+        dist_loss *= self.c1
+
+        return ppl_loss, dist_loss
 
     def training_step(self, model, inputs) -> torch.Tensor:
         model.train()
         inputs = self._prepare_inputs(inputs)
 
         with self.compute_loss_context_manager():
-            ppl_loss, distance_loss = self.compute_loss(model, inputs)
+            ppl_loss, dist_loss = self.compute_loss(model, inputs)
         
-        self.log({'ppl_loss':ppl_loss.mean().item(), 'distance_loss':distance_loss.mean().item()})
-        # self.log({'distance_loss':distance_loss.mean().item()})
+        self.log({'ppl_loss':ppl_loss.mean().item() / self.c0 if self.c0 != 0 else 0, 
+                  'ppl_loss_time_c0':ppl_loss.mean().item(), 
+                  'dist_loss':dist_loss.mean().item() / self.c1 if self.c1 != 0 else 0,
+                #   'dist_loss':torch.exp(dist_loss.mean() / self.c1).item() if self.c1 != 0 else 0,
+                  'dist_loss_time_c1':dist_loss.mean().item()})
         
+        # Udpate c0
+        # self.c0 = (dist_loss.mean().item()/ self.c1)* 1e4
+        # if self.c0 > 10: self.c0 = 10
+        # if self.c0 < 1/100: self.c0 = 1/100
+
         if self.args.n_gpu > 1:
-            ppl_loss, distance_loss = ppl_loss.mean(), distance_loss.mean()  # mean() to average on multi-gpu parallel training
+            ppl_loss, dist_loss = ppl_loss.mean(), dist_loss.mean()  # mean() to average on multi-gpu parallel training
 
         else:
-            self.accelerator.backward(ppl_loss+distance_loss)
+            self.accelerator.backward(ppl_loss+dist_loss)
 
-        return (ppl_loss+distance_loss).detach() / self.args.gradient_accumulation_steps
+        return (ppl_loss+dist_loss).detach() / self.args.gradient_accumulation_steps
 
 
 def train():
@@ -178,8 +197,7 @@ def train():
         tuple[ModelArguments, TrainingArguments, Args],
         parser.parse_args_into_dataclasses(),
     )
-    # dataset = load_dataset("json", data_files=args.datafile_paths, split="train")
-    # dataset = load_dataset(args.datafile_paths, split="train")
+    
     dataset = load_dataset("ise-uiuc/Magicoder-Evol-Instruct-110K",split="train")
     model_key = model_args.model_key
     if (model_name_or_path := model_args.model_name_or_path) is None:
@@ -240,6 +258,8 @@ def train():
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
+        c0 = args.c0,
+        c1 = args.c1
         # eval_dataset=small_eval_dataset,
         # compute_metrics=compute_metrics,
     )
